@@ -1,5 +1,6 @@
 # Cosmos-Reason-2-Speed-Blocker
--> from ~150 s to 2.19 s before the first word
+-> This project provides a patch to fix the embedding layer slowness on Qwen3VL when processing images or videos
+-> Result: time to first token from ~150 s to 2.19 s (before the first word)
 
 ---
 
@@ -7,7 +8,7 @@
 
 ### 1.1 The big picture and the task
 
-I wanted to show, hands-on, how NVIDIA's **Cosmos Reason 2** (a VLM: Vision-Language Model) understands driving scenes. I passed **10 clips** from NVIDIA's PhysicalAI-AV dataset (night, rain, road works, pedestrians) through the model on my RTX 4090 laptop (16 GB) and asked it to answer the same 3 questions for each clip:
+I wanted to show, hands-on, how NVIDIA's **Cosmos Reason 2** (a VLM: Vision-Language Model) understands driving scenes. I was using the model `Qwen3VL` I passed **10 clips** from NVIDIA's PhysicalAI-AV dataset (night, rain, road works, pedestrians) through the model on my RTX 4090 laptop (16 GB) and asked it to answer the same 3 questions for each clip:
 
 1. *Describe what happens in this clip, in time order.*
 2. *Is it safe for the ego vehicle to change lanes to the left at the end of this clip? Explain.*
@@ -23,6 +24,7 @@ For every answer, I measured the speed and memory, then graded it by hand.
     2.2. **`bench.py`:** loops 10 clips × 3 questions and writes `results\benchmark.csv`.
 3. **Reproduce the problem:** Run the smoke test with only one image: `python smoke_image.py` (one photo) or `python bench.py`, then look at `ttft_s`.
 
+More on project: https://github.com/marcelpatrick/Run-Cosmos-Reason-2-on-Driving-Clips 
 ---
 
 ## 2 · The problem
@@ -55,11 +57,11 @@ for k in ("input_tokens", "output_tokens", "prep_s", "ttft_s", "tok_per_s",
 ![Before the fix: bench.py](img/1_before_bench.png)
 
 ### 2.2 Root cause
+- The problem was a major lag when converting the image to tokens (time before generating the first word)
 
 #### 2.2.1 How I found it
 
-1. **The first suspect was memory.** Task Manager showed GPU memory overflowing into system RAM (15.6 GB dedicated + 4.6 GB shared). I fixed that with `torch.cuda.empty_cache()`, but **the wait didn't change**, so memory wasn't the cause.
-2. **Then I measured each stage.** using a diagnostic script `diag.py` puts a stopwatch (PyTorch hooks) around the vision encoder only: **153.4 of 154.3 s** were inside it.
+** I measured each stage.** using a diagnostic script `diag.py` puts a stopwatch (PyTorch hooks) around the vision encoder only: **122.08 of 149.08 s** were inside it.
 
 diag.py
 ```py
@@ -153,38 +155,77 @@ for label, kw in tests:
           f"first_token={r['ttft_s']}s  total={r['total_s']}s")
 ```
 
-![Memory spill (fixed, but not the cause)](img/task_manager_memory_spill.png)
-![diag.py: the vision encoder takes almost the whole wait](img/2_diag.png)
+<img width="1512" height="859" alt="image" src="https://github.com/user-attachments/assets/059e46ae-4a7f-44f6-9952-f46c068c6216" />
 
+#### 2.2.2 What caused it, and why: A PyTorch version issue
 
+Before the language model can read an image, the **vision encoder** turns pixels into tokens. Its first layer is a **3D convolution (Conv3d)** that cuts frames into 16×16-pixel patches (2 frames deep). In **PyTorch 2.9.0**, the version NVIDIA's setup pins, this Conv3d takes a **very slow GPU code path in half precision (fp16)**, a known regression reported by other Qwen3-VL users: 
+. https://discuss.pytorch.org/t/conv3d-runs-very-slow-in-fp16-and-bf16/223940
+. https://github.com/pytorch/pytorch/issues/166643
+. https://forums.developer.nvidia.com/t/cudnn-bug-report-conv3d-performance-regression-with-bfloat16-float16-on-h100/355210
 
-#### 2.2.2 What caused it, and why
-
-Before the language model can read an image, the **vision encoder** turns pixels into tokens. Its first layer is a **3D convolution (Conv3d)** that cuts frames into 16×16-pixel patches (2 frames deep). In **PyTorch 2.9.0**, the version NVIDIA's setup pins, this Conv3d takes a **very slow GPU code path in half precision (fp16)**, a known regression reported by other Qwen3-VL users. The giveaway: the GPU showed ~97% "busy" while drawing only ~34–54 W of 175 W. It was mostly waiting, not computing. The model, the weights and the laptop were fine; one library code path was the bottleneck.
+The giveaway: the GPU showed ~97% "busy" while drawing only ~34–54 W of 175 W. It was mostly waiting, not computing. The model, the weights and the laptop were fine; one library code path was the bottleneck.
 
 ---
 
-## 3 · The solution, and why it worked
+## 3 · The solution 
+
+There are 2 types of fixes: 
+  1. Swap the PyTorch version from 2.9.0 to 2.9.1.
+  2. Keep PyTorch version 2.9.0 and implement a patch
+
+I chose the 2nd because it allowed me to keep PyTorch's version pinned by NVIDIA and I was afraid that changing a version mid-project would break something else. 
+
+### The Patch:
 
 This Conv3d's **kernel equals its stride**: each patch is seen exactly once, with no overlap. That makes it mathematically identical to a plain **matrix multiply**, so I replaced only that layer's forward step with one.
 
-**Paste in `cr2.py`, just above `def load(`** (`import torch` is already there):
-```python
-import types
+Befor loading the model: **Paste just above `def load(`**:
 
+```python
+# ══════════════════════════════════════════════════════════════════════════════
+# Patch to make shortten time to first token (ttft)
+# ══════════════════════════════════════════════════════════════════════════════
+
+### PASTE:
+import types
 def _fast_patch_embed(model):
+    """PyTorch 2.9.0 runs this Conv3d slowly in fp16. kernel == stride, so it is a matrix multiply."""
     pe = model.model.visual.patch_embed
     def forward(self, hidden_states):
         w = self.proj.weight
         x = hidden_states.reshape(-1, w[0].numel()).to(w.dtype)
         return torch.nn.functional.linear(x, w.reshape(w.shape[0], -1), self.proj.bias)
     pe.forward = types.MethodType(forward, pe)
+###
+
+# ══════════════════════════════════════════════════════════════════════════════
+# load(): put the model and its processor on the GPU, once
+# ══════════════════════════════════════════════════════════════════════════════
+def load(max_vision_tokens: int = 8192):
+
 ```
 **Paste inside `load()`, right after `model = ...from_pretrained(...)`:**
 ```python
+def load(max_vision_tokens: int = 8192):
+ 
+    # ── STEP 1: Load model + processor. 
+    model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
+        MODEL, dtype=torch.float16, device_map="auto", attn_implementation="sdpa"
+    )
+
+    ### PASTE: apply patch to the model to reduce ttft
     _fast_patch_embed(model)
+    ###
+
+    # ── STEP 2 · Load the processor  
+    proc = transformers.Qwen3VLProcessor.from_pretrained(MODEL)
 ```
 
+If you are following this tutorial (https://github.com/marcelpatrick/Run-Cosmos-Reason-2-on-Driving-Clips), these changes are to be applied inside file `cr2.py`
+
+### Result
 **Result:** the first word arrives after **2.19 s** instead of 107–153 s (~50–70× faster). It worked because matrix multiplies run on PyTorch's fast, well-optimized GPU path. The fix is the same maths, the same weights, and changes only one layer.
 
-![Before and after](img/3_before_after.png)
+<img width="1499" height="788" alt="image" src="https://github.com/user-attachments/assets/cf896c08-90ac-44a7-afde-fb6aed0a6aad" />
+
