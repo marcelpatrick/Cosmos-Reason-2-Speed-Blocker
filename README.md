@@ -22,7 +22,7 @@ For every answer, I measured the speed and memory, then graded it by hand.
 2. Implement Cosmos 2 in your local machine: https://github.com/marcelpatrick/Run-Cosmos-Reason-2-on-Driving-Clips 
     2.1. **`cr2.py`:** `load()` loads the model in fp16; `ask()` sends the video then the question and times the first word (`ttft_s`), the writing speed and peak memory.
     2.2. **`bench.py`:** loops 10 clips × 3 questions and writes `results\benchmark.csv`.
-3. **Reproduce the problem:** Run the smoke test with only one image: `python smoke_image.py` (one photo) or `python bench.py`, then look at `ttft_s`.
+3. **Reproduce the problem:** Run the smoke test with only one image**: `python smoke_image.py` (one photo) or `python bench.py`, then look at `ttft_s`.
 
 More on project: https://github.com/marcelpatrick/Run-Cosmos-Reason-2-on-Driving-Clips 
 ---
