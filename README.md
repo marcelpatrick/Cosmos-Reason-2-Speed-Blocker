@@ -33,7 +33,7 @@ More on project: https://github.com/marcelpatrick/Run-Cosmos-Reason-2-on-Driving
 
 When I ran the 10 clips through the model, I noticed it was taking a very long time (~1hr) to analyze only 10 clips with ~8sec each.
 
-Then I ran the smoke test `python smoke_image.py` which takes only 1 image and describes it. The same problem was observed. I noticed on the performance metrics that every answer waited **~130–150 s before the first word**, even for one photo (107 s). Once it started, writing was normal (~30 tokens/s), and memory was fine (~7 GB). So the model wasn't slow at *writing*; something before the first word was.
+Then I ran the smoke test `python smoke_image.py` which takes only 1 image and describes it. The same problem was observed. I noticed on the performance metrics that every answer waited **~100–150s** before the first word (**time to first token - ttft**), even for one photo (107 s). Once it started, writing was normal (~30 tokens/s), and memory was fine (~7 GB). So the model wasn't slow at *writing*; something before the first word was.
 
 smoke_image.py:
 ```py
@@ -155,7 +155,8 @@ for label, kw in tests:
           f"first_token={r['ttft_s']}s  total={r['total_s']}s")
 ```
 
-<img width="1512" height="859" alt="image" src="https://github.com/user-attachments/assets/059e46ae-4a7f-44f6-9952-f46c068c6216" />
+<img width="1502" height="618" alt="image" src="https://github.com/user-attachments/assets/95fc5e06-7efc-4f49-9530-7281817b3d35" />
+
 
 #### 2.2.2 What caused it, and why: A PyTorch version issue
 
@@ -227,5 +228,6 @@ If you are following this tutorial (https://github.com/marcelpatrick/Run-Cosmos-
 ### Result
 **Result:** the first word arrives after **2.19 s** instead of 107–153 s (~50–70× faster). It worked because matrix multiplies run on PyTorch's fast, well-optimized GPU path. The fix is the same maths, the same weights, and changes only one layer.
 
-<img width="1499" height="788" alt="image" src="https://github.com/user-attachments/assets/cf896c08-90ac-44a7-afde-fb6aed0a6aad" />
+<img width="1498" height="547" alt="image" src="https://github.com/user-attachments/assets/e7ca0670-c860-4385-9680-67787db2d83c" />
+
 
